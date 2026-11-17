@@ -27,7 +27,7 @@ def validate_handoff(
     available_evidence: set[str],
 ) -> None:
     # TODO 6 — Compléter le contrôle de permission.
-    allowed_target = None
+    allowed_target = handoff.target in allowed.get(handoff.source, set())
     if not allowed_target:
         raise PermissionError("transition interdite")
     # Contrôles des preuves et du budget déjà fournis.
@@ -79,7 +79,12 @@ def full_pipeline_run(
             return OrchestrationResult(pattern="pipeline", status="BUDGET_EXHAUSTED", state=state, handoffs=handoffs, transitions=transitions, actions=actions)
         _run_worker(source, state, workers)
         # TODO 7 — Construire le handoff de l'étape courante.
-        handoff = None
+        handoff = make_handoff(
+            source,
+            target,
+            state,
+            artifact=state.artifacts[source],
+        )
         validate_handoff(handoff, FULL_TRANSITIONS, set(state.evidence_ids))
         handoffs.append(handoff)
         transitions.append(f"{source}→{target}")
@@ -133,7 +138,17 @@ def full_supervisor_run(
         if target == "human":
             break
         # TODO 8 — Construire le handoff Quality vers la cible.
-        handoff = None
+        # TODO 8 — Construire le handoff Quality vers la cible.
+        handoff = make_handoff(
+            "quality",
+            target,
+            state,
+            status="partial",
+            artifact={
+                "feedback": state.quality.feedback,
+                "repair_target": target,
+            },
+        )
         validate_handoff(handoff, FULL_TRANSITIONS, set(state.evidence_ids))
         handoffs.append(handoff)
         transitions.append(f"quality→{target}")

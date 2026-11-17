@@ -11,8 +11,10 @@ def _tokens(text: str) -> set[str]:
 
 def parse_claims(report: dict) -> list[Claim]:
     # TODO 1 — Transformer les dictionnaires en Claim validés.
-    return []
-
+    return [
+        Claim.model_validate(item)
+        for item in report.get("claims", [])
+    ]
 
 def evaluate_rules(
     report: dict,
@@ -25,7 +27,7 @@ def evaluate_rules(
     claims = parse_claims(report)
     sections = {section.get("rq_id") for section in report.get("sections", [])}
     # TODO 2 — Remplacer None par la formule de couverture.
-    rq_coverage = None
+    rq_coverage = len(sections & required_rqs) / max(1, len(required_rqs))
     findings: list[ClaimFinding] = []
     valid_citations = 0
     for claim in claims:
@@ -33,14 +35,14 @@ def evaluate_rules(
             findings.append(ClaimFinding(claim_id=claim.id, status="unsupported", reason="Aucune preuve annoncée."))
             continue
         # TODO 3a — Récupérer les preuves citées.
-        selected = None
+        selected = [evidence_by_id.get(identifier) for identifier in claim.evidence_ids]
         if any(item is None for item in selected):
             findings.append(ClaimFinding(claim_id=claim.id, status="unsupported", reason="Une preuve citée est inconnue."))
             continue
         valid_citations += 1
         source_text = " ".join((item.finding or item.text) for item in selected if item is not None)
         # TODO 3b — Calculer le recouvrement lexical.
-        overlap = None
+        overlap = _tokens(claim.text) & _tokens(source_text)
         if len(overlap) < 2:
             findings.append(ClaimFinding(claim_id=claim.id, status="unsupported", reason="La citation ne soutient pas clairement l'affirmation."))
         else:
@@ -58,11 +60,15 @@ def evaluate_rules(
     if not claims:
         feedback.append("Le rapport ne contient aucune affirmation atomique.")
     # TODO 3c — Choisir ACCEPT ou REVISE.
-    verdict = None
+    verdict = "ACCEPT" if score >= threshold and not feedback else "REVISE"
     # Un problème de preuve doit retourner vers RAG ; une formulation faible
     # peut rester du ressort du WritingAgent.
     # TODO 3d — Choisir rag ou writing.
-    repair_target = None
+    repair_target = (
+    "rag"
+    if any(f.status != "supported" for f in findings)
+    else "writing"
+    )
     return QualityReport(
         verdict=verdict,
         score=score,
@@ -74,18 +80,24 @@ def evaluate_rules(
         repair_target=repair_target,
     )
 
-
 def build_llm_judge(model):
     """Construit un juge LLM ; les règles déterministes restent prioritaires."""
     structured = model.with_structured_output(QualityJudgeDecision)
 
     def judge(report: dict, rule_report: QualityReport) -> QualityReport:
         # TODO 4a — Construire le prompt.
-        prompt = None
+        prompt = f"Rapport : {report}\nContrôle : {rule_report.model_dump()}"
+
         # TODO 4b — Appeler le modèle structuré.
-        result = None
+        result = structured.invoke(prompt)
+
         # TODO 4c — Valider la sortie Pydantic.
-        decision = None
+        decision = (
+            result
+            if isinstance(result, QualityJudgeDecision)
+            else QualityJudgeDecision.model_validate(result)
+        )
+
         # Le juge LLM enrichit le contrôle, mais ne peut pas annuler une
         # alerte déterministe : une preuve inconnue ou non ancrée reste REVISE.
         feedback = list(dict.fromkeys(rule_report.feedback + decision.feedback))
@@ -104,8 +116,6 @@ def build_llm_judge(model):
         })
 
     return judge
-
-
 def run_quality_loop(
     draft: dict,
     evidence: list[EvidenceItem],
@@ -123,8 +133,8 @@ def run_quality_loop(
             quality = judge(current, quality)
         quality = quality.model_copy(update={"revision": revision})
         reports.append(quality)
-        # TODO 5a — Arrêt immédiat si la qualité est acceptable.
-        if quality.verdict == None:
+        # TODO 5a — Arrêt aimmédiat si la qualité est acceptable.
+        if quality.verdict == "ACCEPT":
             return {"report": current, "quality": quality, "history": reports}
         # TODO 5b — Budget épuisé : escalade sans nouvel appel Writer.
         if quality.verdict == "ESCALATE" or revision == max_revisions:
